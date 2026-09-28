@@ -896,18 +896,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = session?.id;
     if (!sid) return;
     let disposed = false;
-    const clientId = crypto.randomUUID();
-    let sequence = 0;
+    let renewing = false;
 
-    const renewLease = async (focused = document.visibilityState === "visible" && document.hasFocus()) => {
-      if (disposed) return;
+    const renewLease = async () => {
+      if (disposed || renewing) return;
+      renewing = true;
       try {
         const response = await fetch(`/api/agent/${encodeURIComponent(sid)}/lease`, {
           method: "POST",
           cache: "no-store",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ presence: { version: 1, clientId, sequence: ++sequence, focused } }),
-          keepalive: true,
         });
         if (!response.ok || disposed) return;
         const result = await response.json() as { renewed?: number };
@@ -922,27 +919,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       } catch {
         // Retry on the next interval; the SSE connection remains the primary path.
+      } finally {
+        renewing = false;
       }
     };
 
     const interval = setInterval(() => void renewLease(), SESSION_LEASE_RENEW_INTERVAL_MS);
-    const onVisible = () => { void renewLease(); };
-    const onAway = () => { void renewLease(false); };
-    void renewLease();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void renewLease();
+    };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onVisible);
-    window.addEventListener("blur", onAway);
-    window.addEventListener("pagehide", onAway);
-    window.addEventListener("pageshow", onVisible);
     return () => {
-      onAway(); // Switching chats reports away for the old session only.
       disposed = true;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onVisible);
-      window.removeEventListener("blur", onAway);
-      window.removeEventListener("pagehide", onAway);
-      window.removeEventListener("pageshow", onVisible);
     };
   }, [closeEvents, maintainEventsConnected, session?.id]);
 
