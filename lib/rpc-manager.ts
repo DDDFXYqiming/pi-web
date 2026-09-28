@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, createEventBus, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -113,6 +113,7 @@ type ExtensionCommandContextActionsLike = {
 };
 
 type AgentSessionWrapperOptions = {
+  reportPresence?: (data: unknown) => void;
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
@@ -247,6 +248,7 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly reportPresence?: (data: unknown) => void;
   private sessionShutdownEmitted = false;
   private forceShutdownOnIdle = false;
   private _alive = true;
@@ -255,10 +257,21 @@ export class AgentSessionWrapper {
     public readonly inner: AgentSessionLike,
     options: AgentSessionWrapperOptions = {},
   ) {
+    this.reportPresence = options.reportPresence;
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+  }
+
+  reportBrowserPresence(data: unknown): void {
+    if (!data || typeof data !== "object") return;
+    const report = data as Record<string, unknown>;
+    if (report.version !== 1 || typeof report.clientId !== "string"
+      || !/^[\w-]{1,80}$/.test(report.clientId)
+      || !Number.isSafeInteger(report.sequence) || (report.sequence as number) < 0
+      || typeof report.focused !== "boolean") return;
+    this.reportPresence?.({ version: 1, clientId: report.clientId, sequence: report.sequence, focused: report.focused });
   }
 
   get sessionId(): string {
@@ -2029,6 +2042,7 @@ export async function startRpcSession(
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
+    const presenceBus = createEventBus();
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2052,6 +2066,7 @@ export async function startRpcSession(
         : chatOnly
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
         : {
+            eventBus: presenceBus,
             extensionFactories: [
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
@@ -2140,6 +2155,7 @@ export async function startRpcSession(
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
     const wrapper = new AgentSessionWrapper(inner, {
+      reportPresence: (data) => presenceBus.emit("pi-web:presence", data),
       exactSystemPrompt,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {
